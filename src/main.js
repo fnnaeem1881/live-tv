@@ -23,10 +23,22 @@ const BUILTIN_FIFA_CHANNELS = [
   { name: 'TSN 1 (Canada)', url: 'https://cdn011.viaplus.site/tsn1-ca.m3u8' },
   { name: 'FOX 4K (USA)', url: 'https://cdn011.viaplus.site/fox4k-usa.m3u8' },
   { name: 'Fussball TV 1 UHD (Germany)', url: 'https://cdn011.viaplus.site/fussballtv1uhd-de.m3u8' },
-  // Toffee is CORS-blocked in-browser (their CDN sends no Access-Control-Allow-Origin),
-  // so it can't play in a web app without a proxy. Kept last; auto-failover skips it.
+  // Toffee's CDN sends no Access-Control-Allow-Origin, so a browser can't load
+  // it directly — startStream() auto-retries through our proxy on failure.
   { name: 'Toffee FIFA HD (BD)', url: 'https://prod-cdn01-live.toffeelive.com/live/FIFA-2026-3/0/master_1750.m3u8?hdntl=Expires=1782866074~_GO=Generated~URLPrefix=aHR0cHM6Ly9wcm9kLWNkbjAxLWxpdmUudG9mZmVlbGl2ZS5jb20~Signature=AeQsclCGelVte2IiOGcwsJnkVmlh9kIGZARR9-eMUV_OPS2_vvtjSSYwO-FbiiXEh7epqBKkckq6D9zMuD4nm4j2BHQL' },
 ].map((c) => ({ ...c, group: 'Fifa', categories: ['Fifa'], logo: FIFA_LOGO, country: '' }));
+
+// Backend CORS/mixed-content proxy (see server/). Falls back to it
+// automatically when a stream fails to load directly.
+const PROXY_BASE = import.meta.env.VITE_PROXY_BASE || 'http://localhost:8787';
+
+function proxiedManifestUrl(url) {
+  return `${PROXY_BASE}/proxy/m3u8?url=${encodeURIComponent(url)}`;
+}
+
+function proxiedSegmentUrl(url) {
+  return `${PROXY_BASE}/proxy/segment?url=${encodeURIComponent(url)}`;
+}
 
 const CACHE_KEY = 'livetv-channel-cache-v2';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1873,23 +1885,23 @@ function destroyPlayers() {
   }
 }
 
-function startStream(url) {
+function startStream(url, { viaProxy = false } = {}) {
   destroyPlayers();
   streamActive = true;
   showSpinner(true);
 
-  // Mixed content: an http:// stream can never load on an https-hosted page —
-  // the browser hard-blocks it. Fail fast with a clear message instead of
-  // spinning until the watchdog.
-  if (location.protocol === 'https:' && url.startsWith('http://')) {
-    failChannel('Insecure (http) channel blocked on a secure site');
+  // http:// streams are hard-blocked by the browser as mixed content on an
+  // https page, before hls.js even gets a chance — route straight through the
+  // proxy (it fetches server-side and re-serves over our own origin).
+  if (!viaProxy && location.protocol === 'https:' && url.startsWith('http://')) {
+    startStream(url, { viaProxy: true });
     return;
   }
 
   // Raw MPEG-TS streams (common in FIFA/BDIX panel lists) aren't HLS — hls.js
   // can't play them. Route .ts URLs through mpegts.js (lazy-loaded).
   if (isRawTsUrl(url)) {
-    startMpegtsStream(url);
+    startMpegtsStream(url, viaProxy);
     return;
   }
 
@@ -1922,7 +1934,7 @@ function startStream(url) {
       levelLoadingTimeOut: 6000,
     });
 
-    hls.loadSource(url);
+    hls.loadSource(viaProxy ? proxiedManifestUrl(url) : url);
     hls.attachMedia(video);
     startNetQualityMonitor();
 
@@ -1943,10 +1955,17 @@ function startStream(url) {
 
     hls.on(Hls.Events.ERROR, (event, data) => {
       if (!data.fatal) return;
+      // First failure on a direct attempt: silently retry once through our
+      // proxy before falling into the normal retry/failover flow — this
+      // transparently recovers CORS-blocked and mixed-content streams.
+      if (!viaProxy && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        startStream(url, { viaProxy: true });
+        return;
+      }
       switch (data.type) {
         case Hls.ErrorTypes.NETWORK_ERROR:
           setNetStatus('Network issue, reconnecting...', true);
-          scheduleRetry(url);
+          scheduleRetry(url, viaProxy);
           break;
         case Hls.ErrorTypes.MEDIA_ERROR:
           setNetStatus('Recovering playback...', true);
@@ -1954,11 +1973,11 @@ function startStream(url) {
           break;
         default:
           setNetStatus('Stream error, retrying...', true);
-          scheduleRetry(url);
+          scheduleRetry(url, viaProxy);
       }
     });
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = url;
+    video.src = viaProxy ? proxiedManifestUrl(url) : url;
   } else {
     video.src = url;
     video.play().catch(() => {});
@@ -1985,7 +2004,7 @@ function isRawTsUrl(url) {
   return /\.ts(\?.*)?$/i.test(url);
 }
 
-async function startMpegtsStream(url) {
+async function startMpegtsStream(url, viaProxy = false) {
   try {
     const mpegtsMod = await import('mpegts.js');
     const mpegts = mpegtsMod.default || mpegtsMod;
@@ -1997,13 +2016,19 @@ async function startMpegtsStream(url) {
     if (currentChannel && currentChannel.url !== url) return;
 
     tsPlayer = mpegts.createPlayer(
-      { type: 'mpegts', isLive: true, url },
+      { type: 'mpegts', isLive: true, url: viaProxy ? proxiedSegmentUrl(url) : url },
       // liveBufferLatencyChasing off: chasing the live edge causes constant
       // stalls on slow IPTV feeds. A small stable buffer plays much smoother.
       { enableWorker: true, liveBufferLatencyChasing: false, lazyLoad: false, stashInitialSize: 1024 * 256 }
     );
     tsPlayer.attachMediaElement(video);
-    tsPlayer.on(mpegts.Events.ERROR, () => failChannel("This channel isn't responding"));
+    tsPlayer.on(mpegts.Events.ERROR, () => {
+      if (!viaProxy) {
+        startMpegtsStream(url, true); // retry once through the proxy before giving up
+        return;
+      }
+      failChannel("This channel isn't responding");
+    });
     tsPlayer.load();
     startNetQualityMonitor();
     video.play().catch(() => {});
@@ -2012,14 +2037,14 @@ async function startMpegtsStream(url) {
   }
 }
 
-function scheduleRetry(url) {
+function scheduleRetry(url, viaProxy = false) {
   if (retryCount >= 2) {
     failChannel("This channel isn't responding");
     return;
   }
   retryCount += 1;
   clearTimeout(retryTimer);
-  retryTimer = setTimeout(() => startStream(url), 1500 * retryCount);
+  retryTimer = setTimeout(() => startStream(url, { viaProxy }), 1500 * retryCount);
 }
 
 function showSpinner(show) {
