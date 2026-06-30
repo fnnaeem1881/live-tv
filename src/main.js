@@ -2,6 +2,7 @@ import './style.css';
 import Hls from 'hls.js';
 import { parseM3U } from './m3u.js';
 import { joinChannel, leaveChannel, watchViewerCount, viewersAvailable } from './firebase.js';
+import { trackPageView, trackEvent } from './analytics.js';
 
 // ---------- Config (all consts up top, init() runs last — avoids TDZ order bugs) ----------
 
@@ -28,22 +29,379 @@ const BUILTIN_FIFA_CHANNELS = [
   { name: 'Toffee FIFA HD (BD)', url: 'https://prod-cdn01-live.toffeelive.com/live/FIFA-2026-3/0/master_1750.m3u8?hdntl=Expires=1782866074~_GO=Generated~URLPrefix=aHR0cHM6Ly9wcm9kLWNkbjAxLWxpdmUudG9mZmVlbGl2ZS5jb20~Signature=AeQsclCGelVte2IiOGcwsJnkVmlh9kIGZARR9-eMUV_OPS2_vvtjSSYwO-FbiiXEh7epqBKkckq6D9zMuD4nm4j2BHQL' },
 ].map((c) => ({ ...c, group: 'Fifa', categories: ['Fifa'], logo: FIFA_LOGO, country: '' }));
 
+// Toffee (toffeelive.com, Bangladesh) channel set. Their CDN requires both a
+// mobile user-agent and a signed Edge-Cache-Cookie — neither can be set from
+// browser JS (UA is fixed by the browser, Cookie headers are blocked on
+// cross-origin requests), so these always play through our backend proxy
+// (server/index.js), which forwards `cookie` as a real request header.
+// Live match streams are filed under Fifa; everything else is grouped by
+// country (Bangladesh) like the rest of the app, plus a shared "Toffee" tag
+// so the Toffee trending-category card on the home page pulls in all of them.
+const TOFFEE_COOKIE =
+  'Edge-Cache-Cookie=URLPrefix=aHR0cHM6Ly9ibGRjbXByb2QtY2RuLnRvZmZlZWxpdmUuY29t:Expires=1782978123:KeyName=prod_linear:Signature=aX4xRu8U3oLnqgd_zCWiZ0kToYhKR8yRRgxIKzKb-CY6KxueUhDa9qvCDseqSgVnkewy7EIGBXnNIBaOgVRuDw';
+
+const TOFFEE_FIFA_MATCHES = [
+  {
+    name: 'Toffee HD',
+    url: 'https://prod-cdn01-live.toffeelive.com/live/FIFA-2026/sst/0/master_1750.m3u8?hdntl=Expires=1782844807~_GO=Generated~URLPrefix=aHR0cHM6Ly9wcm9kLWNkbjAxLWxpdmUudG9mZmVlbGl2ZS5jb20~Signature=AeQsclA6H8keVh3yHxpJEuKxsWVZPtHwILmhKK1RPKLjG0n_QikzhzyRNhQ_4PV65IsIFwQU2YN38zJKTGMb1QW-UxwI',
+    logo: 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/zUGrjZ4BuUSiBsg_1BeE/posters/4c8e5c87-d833-4429-989b-15f779a82966.png',
+  },
+].map((c) => ({ ...c, group: 'Fifa', categories: ['Fifa', 'Toffee'], country: '' }));
+
+// name, link, logo, category — everything else (non-match Toffee channels),
+// grouped by country (Bangladesh) per their original Toffee category.
+const TOFFEE_BD_RAW = [
+  ['TOFFEE Sports VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sports_highlights/playlist.m3u8', 'https://images.toffeelive.com/images/program/19779/logo/240x240/mobile_logo_975410001725875598.png', 'Sports'],
+  ['TOFFEE Movies VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/toffee_movie/playlist.m3u8', 'https://images.toffeelive.com/images/program/2708/logo/240x240/mobile_logo_724353001725875591.png', 'Movies'],
+  ['TOFFEE Dramas VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/toffee_drama/playlist.m3u8', 'https://images.toffeelive.com/images/program/44878/logo/240x240/mobile_logo_764950001725875605.png', 'Entertainment'],
+  ['CNN VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/cnn/playlist.m3u8', 'https://images.toffeelive.com/images/program/333/logo/240x240/mobile_logo_146607001735536058.png', 'News'],
+  ['Somoy TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/somoy_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//Xi_Ga5oBNnOkwJLWkhKP/posters/ef2899d5-1ae0-4fee-aee5-45f9b0b3ba80.png', 'News'],
+  ['Jamuna TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/jamuna_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/PiL635oBEef-9-uV2uCe/posters/36f380e0-6c71-4b27-a73b-2afb3ce7e982.png', 'News'],
+  ['ATN News', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/atn_news/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/NCLx35oBEef-9-uVh-Dg/posters/af9773c7-7971-41a2-9b78-121fcb240c48.png', 'News'],
+  ['ATN Bangla', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/atn_bangla/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/MCLv35oBEef-9-uVH-D2/posters/0d1e571c-ebb2-4277-9814-760a4f1603a6.png', 'Entertainment'],
+  ['Ananda TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/anandatv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//wCM3l5sBEef-9-uVXFvD/posters/d80f7aee-5bd7-4edc-97eb-ead0e3ebbe09.png', 'Entertainment'],
+  ['Bijoy TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/bijoytv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//bns4l5sBcqxnFHJBVZ32/posters/feaf9f3d-cc3b-4a3d-81a3-2cb703e561eb.png', 'Entertainment'],
+  ['NTV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/n_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/wHLVIJ4B7a1HdMSjaGLJ/posters/83b89557-3ae8-4ca8-8c5d-3c617359c738.png', 'Entertainment'],
+  ['Global TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/global_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/0y_tDJsBNnOkwJLWNrdE/posters/2ff058e1-630f-4657-8dc6-b677e65642c5.png', 'Entertainment'],
+  ['Channel S', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/channel_s/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//WyPuDJsBEef-9-uVUA_z/posters/ea20055c-a824-443c-8083-ce8e2da8b922.png', 'Entertainment'],
+  ['Rajdhani TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/rajdhani_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/KECGB54BuUSiBsg_dHyj/posters/58af9c58-ed80-458c-af13-cf381680cec6.png', 'Entertainment'],
+  ['Bangla TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/bangla_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//JiK-_poBEef-9-uVZv6L/posters/757a328e-70d6-45de-b093-0a843c69ade7.png', 'Entertainment'],
+  ['Asian TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/asian_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//MyK__poBEef-9-uVmf5l/posters/1eadef5b-28e7-4dc2-b42f-c67a3357c9a0.png', 'Entertainment'],
+  ['Channel i', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/channel_i/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/qnv835oBcqxnFHJBuQcB/posters/348dfac3-c1e0-485d-a72b-3d282c9e2c73.png', 'Entertainment'],
+  ['Movie Bangla', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/movie_bangla/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/CXz4PJwBcqxnFHJBPwrG/posters/2f913e34-3a6c-45e6-9f1f-97bf129a2ff5.png', 'Movies'],
+  ['Nexus TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/nexus_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/FHz5PJwBcqxnFHJBdAqW/posters/419869ac-8ddf-4909-86c1-b69f0a3adf13.png', 'Entertainment'],
+  ['Islamic TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/islamic_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/jehEA54BIxFjn23xAmdw/posters/2c276556-cbcd-4467-b627-4394bb20f250.png', 'Entertainment'],
+  ['Desh TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/desh_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/6Hz1PJwBcqxnFHJBhgkV/posters/845f1e3f-987a-47cc-a48d-ee12d8f4d419.png', 'News'],
+  ['Independent TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/independent_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_480,q_75,f_webp/ES_cZZsBNnOkwJLW1Oz1/posters/b872b8f5-cb6b-45a1-a1cd-7609df51d614.png', 'News'],
+  ['Ekhon TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ekhon_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_640,q_75,f_webp/o3v235oBcqxnFHJBkAdC/posters/159af631-796d-4342-a2a7-c272f32bcd32.png', 'Entertainment'],
+  ['Ekattor TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ekattor_tv/playlist.m3u8', 'https://assets-prod.services.toffeelive.com//PS_La5oBNnOkwJLWLRN_/posters/e8c444fd-ee3b-4bf3-bb0a-f969bc295f82.png', 'News'],
+  ['Euro Sport HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/euro_sports_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/4388/logo/240x240/mobile_logo_422191001674119624.png', 'Sports'],
+  ['ICC Test Championship Highlights', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/icc_wtc_final/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_webp,w_400,q_100/PnZefJcBcqxnFHJBoxca/posters/955ae898-8336-4936-8d78-c6b8866e35f7.png', 'Sports'],
+  ['SONY SPORTS TEN 1 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_sports_1_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/603/logo/240x240/mobile_logo_237244001666780563.png', 'Sports'],
+  ['SONY SPORTS TEN 2 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_sports_2_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/604/logo/240x240/mobile_logo_093449001666780976.png', 'Sports'],
+  ['SONY SPORTS TEN 2 HD (576p)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/slang/sony_sports_2_hd_576/sony_sports_2_hd_576.m3u8', 'https://images.toffeelive.com/images/program/604/logo/240x240/mobile_logo_093449001666780976.png', 'Sports'],
+  ['SONY SPORTS TEN 5 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_sports_5_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/606/logo/240x240/mobile_logo_689539001672145843.png', 'Sports'],
+  ['SONY TEN Cricket', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ten_cricket/playlist.m3u8', 'https://images.toffeelive.com/images/program/301891/logo/240x240/mobile_logo_578686001735197654.png', 'Sports'],
+  ['Cartoon Network HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/cartoon_network_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/26942/logo/240x240/mobile_logo_443429001678950505.png', 'Kids'],
+  ['Cartoon Network', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/cartoon_network_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/27232/logo/240x240/mobile_logo_320294001679201065.png', 'Kids'],
+  ['Pogo', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/pogo_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/27159/logo/240x240/mobile_logo_740957001679201029.png', 'Kids'],
+  ['Discovery Kids', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_kids/playlist.m3u8', 'https://images.toffeelive.com/images/program/611/logo/240x240/mobile_logo_430542001673177743.png', 'Kids'],
+  ['SONY YAY VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonyyay/playlist.m3u8', 'https://images.toffeelive.com/images/program/612/logo/240x240/mobile_logo_091186001666784752.png', 'Kids'],
+  ['Zee Bangla VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_bangla/playlist.m3u8', 'https://images.toffeelive.com/images/program/340/logo/240x240/mobile_logo_094417001655891123.png', 'Entertainment'],
+  ['Zee Anmol', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_anmol/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_webp,w_400,q_100/7x0Jd5YBEef-9-uVv_Gy/posters/f630a176-73cc-48d7-94cf-69ba0d201b36.png', 'Entertainment'],
+  ['Zing', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zing_sd/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_webp,w_400,q_100/DK8dd5YBrjBfS2_Ru22e/posters/a89a1e2e-677c-4a8a-9a66-dff5e0b921c8.png', 'Music'],
+  ['Hum TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/hum_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/303937/logo/240x240/mobile_logo_880134001738072763.png', 'Entertainment'],
+  ['Hum Masala', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/hum_masala/playlist.m3u8', 'https://images.toffeelive.com/images/program/303947/logo/240x240/mobile_logo_203789001738235600.png', 'Entertainment'],
+  ['Hum Sitarey', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/hum_sitaray/playlist.m3u8', 'https://images.toffeelive.com/images/program/303948/logo/240x240/mobile_logo_350939001738236112.png', 'Entertainment'],
+  ['Sony Aat VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonyaath/playlist.m3u8', 'https://images.toffeelive.com/images/program/343/logo/240x240/mobile_logo_496322001666780228.png', 'Entertainment'],
+  ['SONY ENTERTAINMENT TELEVISION HD VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonyentertainmnt_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/602/logo/240x240/mobile_logo_495351001666780441.png', 'Entertainment'],
+  ['SONY ENTERTAINMENT TELEVISION', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_entertainment/playlist.m3u8', 'https://images.toffeelive.com/images/program/57/logo/240x240/mobile_logo_149299001666780350.png', 'Entertainment'],
+  ['B4U Music VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/b4u_music/playlist.m3u8', 'https://images.toffeelive.com/images/program/367/logo/115x115/mobile_logo_886909001563629905.png', 'Music'],
+  ['SONY SAB HD VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonysab_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2420/logo/240x240/mobile_logo_688156001666785674.png', 'Entertainment'],
+  ['Zee TV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_tv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/644/logo/240x240/mobile_logo_649814001655891557.png', 'Entertainment'],
+  ['SONY MAX HD VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_max_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/641/logo/240x240/mobile_logo_440775001666782769.png', 'Movies'],
+  ['Zee Bangla Cinema', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_bangla_cinema/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/w_256,q_75,f_webp/-C7MX5UBv9knK3AHdKOi/posters/b0f0bfe0-f1f3-48b3-83ce-203cd44cafe2.png', 'Movies'],
+  ['Zee Bollywood', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_bollywood/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_png,w_300,q_85/OnSlPJYBcqxnFHJB6lFX/posters/4818f95a-c64a-490f-b310-a49aec026d71.png', 'Movies'],
+  ['Zee Action', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_action/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_webp,w_400,q_100/Pc3RD5YBtpl-Sbt7doxr/posters/d0f337ab-a7e6-4eed-bc7b-7d51fdc70a0f.png', 'Movies'],
+  ['SONY MAX VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_max/playlist.m3u8', 'https://images.toffeelive.com/images/program/352/logo/240x240/mobile_logo_612341001666782969.png', 'Movies'],
+  ['SONY PIX HD VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonypix_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2419/logo/240x240/mobile_logo_287412001666784602.png', 'Movies'],
+  ['Zee Cafe', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_cafe_hd/playlist.m3u8', 'https://assets-prod.services.toffeelive.com/f_webp,w_400,q_100/U3QEd5YBcqxnFHJBpYzc/posters/3442d493-0c71-44b9-b12f-8e600d5eab91.png', 'Movies'],
+  ['B4U Movies VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/b4u_movies/playlist.m3u8', 'https://images.toffeelive.com/images/program/366/logo/240x240/mobile_logo_702115001663003759.png', 'Movies'],
+  ['SONY MAX 2 VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonymax_2/playlist.m3u8', 'https://images.toffeelive.com/images/program/353/logo/240x240/mobile_logo_044841001666779831.png', 'Movies'],
+  ['Zee Bangla Cinema VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_bangla_cinema/playlist.m3u8', 'https://images.toffeelive.com/images/program/403/logo/240x240/mobile_logo_368845001655891378.png', 'Movies'],
+  ['Zee Cinema HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_cinema_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/804/logo/240x240/mobile_logo_370803001655891689.png', 'Movies'],
+  ['TLC HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/tlc_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/608/logo/240x240/mobile_logo_648826001673178929.png', 'Entertainment'],
+  ['TLC', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/tlc_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/358/logo/240x240/mobile_logo_048875001673178985.png', 'Entertainment'],
+  ['Animal Planet', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/animal_planet_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/359/logo/240x240/mobile_logo_835681001673175607.png', 'Entertainment'],
+  ['Animal Planet HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/animal_planet_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18096/logo/240x240/mobile_logo_032001001673194753.png', 'Entertainment'],
+  ['SONY BBC EARTH HD VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonybbc_earth_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/670/logo/240x240/mobile_logo_892290001738663264.png', 'Entertainment'],
+  ['Discovery HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18093/logo/240x240/mobile_logo_868363001673181438.png', 'Entertainment'],
+  ['Discovery', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18097/logo/240x240/mobile_logo_297723001673195119.png', 'Entertainment'],
+  ['Discovery Science', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_science/playlist.m3u8', 'https://images.toffeelive.com/images/program/378/logo/240x240/mobile_logo_604754001673177502.png', 'Entertainment'],
+  ['Discovery Turbo', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_turbo/playlist.m3u8', 'https://images.toffeelive.com/images/program/379/logo/240x240/mobile_logo_775127001673177876.png', 'Entertainment'],
+  ['Investigation Discovery HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovary_investigation_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18094/logo/240x240/mobile_logo_154805001673178308.png', 'Entertainment'],
+  ['&TV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/and_tv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/801/logo/240x240/mobile_logo_974516001655891652.png', 'Entertainment'],
+  ['& Pictures HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/andpicture_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/4570/logo/240x240/mobile_logo_000080001675856893.png', 'Entertainment'],
+
+  // --- Second Toffee dataset (Byte Capsule list). Only entries whose stream
+  // URL wasn't already covered above are kept here (dedupe() also catches any
+  // remaining overlap by URL). That list's own cookie token had already expired
+  // by the time it was supplied, so these reuse TOFFEE_COOKIE instead.
+  ['Star Jalsha VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/star_jalsha/playlist.m3u8', 'https://images.toffeelive.com/images/program/18832/logo/240x240/mobile_logo_166779001683805822.png', 'Entertainment'],
+  ['SONY SPORTS TEN 2 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_ten2_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/604/logo/240x240/mobile_logo_093449001666780976.png', 'Sports'],
+  ['Jalsha Movies VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/jalsha_movies/playlist.m3u8', 'https://images.toffeelive.com/images/program/18834/logo/240x240/mobile_logo_267398001683804913.png', 'Movies'],
+  ['SONY SPORTS TEN 5 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_six_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/606/logo/240x240/mobile_logo_689539001672145843.png', 'Sports'],
+  ['SONY SPORTS TEN 1 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_ten1_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/603/logo/240x240/mobile_logo_237244001666780563.png', 'Sports'],
+  ['Sony Aat', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_aath/playlist.m3u8', 'https://images.toffeelive.com/images/program/343/logo/240x240/mobile_logo_496322001666780228.png', 'Entertainment'],
+  ['Colors Bangla', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/colors_b/playlist.m3u8', 'https://images.toffeelive.com/images/program/2505/logo/240x240/mobile_logo_200057001655891962.png', 'Entertainment'],
+  ['SONY SPORTS TEN 3 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_ten3_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2418/logo/240x240/mobile_logo_992280001666781086.png', 'Sports'],
+  ['SONY SPORTS TEN 1', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ten_1/playlist.m3u8', 'https://images.toffeelive.com/images/program/49/logo/240x240/mobile_logo_559887001666781361.png', 'Sports'],
+  ['SONY SPORTS TEN 2', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ten_2/playlist.m3u8', 'https://images.toffeelive.com/images/program/50/logo/240x240/mobile_logo_832280001666781441.png', 'Sports'],
+  ['SONY SPORTS TEN 3', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ten_3/playlist.m3u8', 'https://images.toffeelive.com/images/program/51/logo/240x240/mobile_logo_066851001666781605.png', 'Sports'],
+  ['SONY SPORTS TEN 5', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_six/playlist.m3u8', 'https://images.toffeelive.com/images/program/351/logo/240x240/mobile_logo_027801001666782321.png', 'Sports'],
+  ['Euro Sport', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/euro_sports_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/4387/logo/240x240/mobile_logo_412057001674119486.png', 'Sports'],
+  ['Ekattor TV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ekattor_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/53/logo/240x240/mobile_logo_107276001655890949.png', 'News'],
+  ['Independent TV (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/independent/playlist.m3u8', 'https://images.toffeelive.com/images/program/40/logo/240x240/mobile_logo_819689001655890845.png', 'News'],
+  ['Channel 24', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/channel_24/playlist.m3u8', 'https://images.toffeelive.com/images/program/52/logo/240x240/mobile_logo_262737001655890931.png', 'News'],
+  ['DBC News', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/dbc_news/playlist.m3u8', 'https://images.toffeelive.com/images/program/335/logo/240x240/mobile_logo_946452001655891077.png', 'News'],
+  ['NEWS24', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/news24hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/233/logo/240x240/mobile_logo_146142001655891039.png', 'News'],
+  ['SATV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/satv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/232/logo/240x240/mobile_logo_731969001673183522.png', 'News'],
+  ['RTV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/rtv_b/playlist.m3u8', 'https://images.toffeelive.com/images/program/338/logo/240x240/mobile_logo_401499001655891091.png', 'Entertainment'],
+  ['NTV (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ntv_b/playlist.m3u8', 'https://images.toffeelive.com/images/program/41/logo/240x240/mobile_logo_811238001673183089.png', 'Entertainment'],
+  ['Banglavision', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/bangla_vision/playlist.m3u8', 'https://images.toffeelive.com/images/program/337/logo/240x240/mobile_logo_519481001656610377.png', 'Entertainment'],
+  ['Ananda TV (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ananda_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/692/logo/240x240/mobile_logo_317599001655891632.png', 'Entertainment'],
+  ['Boishakhi TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/boishakhi/playlist.m3u8', 'https://images.toffeelive.com/images/program/236/logo/240x240/mobile_logo_341242001655891063.png', 'Entertainment'],
+  ['Channel 9', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/channel_9/playlist.m3u8', 'https://images.toffeelive.com/images/program/9/logo/240x240/mobile_logo_363996001656610763.png', 'Entertainment'],
+  ['Mohona TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/mohona_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/368/logo/240x240/mobile_logo_784215001656610543.png', 'Entertainment'],
+  ['MY TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/my_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/339/logo/240x240/mobile_logo_897303001655891103.png', 'Entertainment'],
+  ['BTV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/btv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/63/logo/240x240/mobile_logo_118855001673182388.png', 'Entertainment'],
+  ['Bijoy TV (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/bijoy_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/374/logo/240x240/mobile_logo_179345001655891258.png', 'Entertainment'],
+  ['Asian TV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/asian_tv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/25/logo/240x240/mobile_logo_913146001673185595.png', 'Entertainment'],
+  ['Bangla TV HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/bangla_tv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/375/logo/240x240/mobile_logo_453885001655891270.png', 'Entertainment'],
+  ['Nagorik TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/nagorik_tv_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/365/logo/240x240/mobile_logo_731536001673438371.png', 'Entertainment'],
+  ['Sangsad TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/btv_sangshodh/playlist.m3u8', 'https://images.toffeelive.com/images/program/64/logo/240x240/mobile_logo_760805001655890979.png', 'Entertainment'],
+  ['BTV World', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/btv_world/playlist.m3u8', 'https://images.toffeelive.com/images/program/1/logo/240x240/mobile_logo_310000001673183767.png', 'Entertainment'],
+  ['Ekushey TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ekushey_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/334/logo/240x240/mobile_logo_355998001673183662.png', 'Entertainment'],
+  ['BTV Chattogram', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/btv_ctg/playlist.m3u8', 'https://images.toffeelive.com/images/program/418/logo/240x240/mobile_logo_799556001673182578.png', 'Entertainment'],
+  ['Star Gold VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/star_gold/playlist.m3u8', 'https://images.toffeelive.com/images/program/18835/logo/240x240/mobile_logo_482266001683805730.png', 'Movies'],
+  ['Star Plus VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/star_plus/playlist.m3u8', 'https://images.toffeelive.com/images/program/18841/logo/240x240/mobile_logo_664367001683806020.png', 'Entertainment'],
+  ['Star Bharat VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/star_bharat/playlist.m3u8', 'https://images.toffeelive.com/images/program/18836/logo/240x240/mobile_logo_361773001683805911.png', 'Entertainment'],
+  ['SONY MAX HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/set_max_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/641/logo/240x240/mobile_logo_440775001666782769.png', 'Movies'],
+  ['SONY ENTERTAINMENT TELEVISION HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_entertainmnt_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/602/logo/240x240/mobile_logo_495351001666780441.png', 'Entertainment'],
+  ['SONY SAB HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_sab_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2420/logo/240x240/mobile_logo_688156001666785674.png', 'Entertainment'],
+  ['SONY SAB', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_sab/playlist.m3u8', 'https://images.toffeelive.com/images/program/342/logo/240x240/mobile_logo_512950001666785776.png', 'Entertainment'],
+  ['SONY MAX 2 (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_max_2/playlist.m3u8', 'https://images.toffeelive.com/images/program/353/logo/240x240/mobile_logo_044841001666779831.png', 'Movies'],
+  ['SONY WAH', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_wah/playlist.m3u8', 'https://images.toffeelive.com/images/program/2422/logo/240x240/mobile_logo_037670001666785867.png', 'Entertainment'],
+  ['Sony Pal', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_pal/playlist.m3u8', 'https://images.toffeelive.com/images/program/2421/logo/240x240/mobile_logo_799518001666784496.png', 'Entertainment'],
+  ['Colors', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/colors/playlist.m3u8', 'https://images.toffeelive.com/images/program/2425/logo/240x240/mobile_logo_844782001655891780.png', 'Entertainment'],
+  ['Colors Rishtey', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/colors_rishtey/playlist.m3u8', 'https://images.toffeelive.com/images/program/2436/logo/240x240/mobile_logo_637826001655891948.png', 'Entertainment'],
+  ['& Pictures HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/and_picture_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/4570/logo/240x240/mobile_logo_000080001675856893.png', 'Entertainment'],
+  ['Nick', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/nick/playlist.m3u8', 'https://images.toffeelive.com/images/program/2430/logo/240x240/mobile_logo_823707001655891853.png', 'Kids'],
+  ['SONY YAY (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_yay/playlist.m3u8', 'https://images.toffeelive.com/images/program/612/logo/240x240/mobile_logo_091186001666784752.png', 'Kids'],
+  ['Sonic', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sonic/playlist.m3u8', 'https://images.toffeelive.com/images/program/2434/logo/240x240/mobile_logo_464854001655891908.png', 'Kids'],
+  ['Nick Jr', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/nick_junior/playlist.m3u8', 'https://images.toffeelive.com/images/program/2435/logo/240x240/mobile_logo_910829001655891932.png', 'Kids'],
+  ['Colors Bangla Cinema', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/colors_bangla_cinema/playlist.m3u8', 'https://images.toffeelive.com/images/program/10157/logo/240x240/mobile_logo_151189001655892087.png', 'Movies'],
+  ['TOFFEE Movies VIP (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sports_live_01/playlist.m3u8', 'https://images.toffeelive.com/images/program/2708/logo/240x240/mobile_logo_406284001687254721.png', 'Movies'],
+  ['Zee Bollywood (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_bolly/playlist.m3u8', 'https://images.toffeelive.com/images/program/400/logo/240x240/mobile_logo_624780001655891361.png', 'Movies'],
+  ['SONY PIX HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_pix_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2419/logo/240x240/mobile_logo_287412001666784602.png', 'Movies'],
+  ['SONY PIX', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_pix/playlist.m3u8', 'https://images.toffeelive.com/images/program/397/logo/240x240/mobile_logo_049568001666785583.png', 'Movies'],
+  ['I Film English', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/iflim_english/playlist.m3u8', 'https://images.toffeelive.com/images/program/18098/logo/240x240/mobile_logo_508084001673240324.png', 'Movies'],
+  ['Lotus Macau', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/lotus_macau/playlist.m3u8', 'https://images.toffeelive.com/images/program/389/logo/240x240/mobile_logo_466667001673185088.png', 'Movies'],
+  ['Quran TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/quran_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/613/logo/240x240/mobile_logo_192652001655891524.png', 'Entertainment'],
+  ['Sunnah TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sunnah_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/610/logo/240x240/mobile_logo_677105001655891492.png', 'Entertainment'],
+  ['AL Jazeera', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/aljazeera/playlist.m3u8', 'https://images.toffeelive.com/images/program/234/logo/240x240/mobile_logo_496491001655891051.png', 'News'],
+  ['DW', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/dw/playlist.m3u8', 'https://images.toffeelive.com/images/program/363/logo/240x240/mobile_logo_700739001655891233.png', 'News'],
+  ['Zee News', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_news/playlist.m3u8', 'https://images.toffeelive.com/images/program/336/logo/240x240/mobile_logo_740569001675858107.png', 'News'],
+  ['RTR Planeta', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/rtr_planet/playlist.m3u8', 'https://images.toffeelive.com/images/program/662/logo/240x240/mobile_logo_851160001655891584.png', 'News'],
+  ['Euro News VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/euro_news/playlist.m3u8', 'https://images.toffeelive.com/images/program/655/logo/240x240/mobile_logo_455321001655891572.png', 'News'],
+  ['Arirang TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/arirang/playlist.m3u8', 'https://images.toffeelive.com/images/program/372/logo/240x240/mobile_logo_311458001655891246.png', 'News'],
+  ['Channel News Asia', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/channel_n_asia/playlist.m3u8', 'https://images.toffeelive.com/images/program/393/logo/240x240/mobile_logo_435300001673184707.png', 'News'],
+  ['Zee Business VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zee_business/playlist.m3u8', 'https://images.toffeelive.com/images/program/4569/logo/240x240/mobile_logo_422385001655892034.png', 'News'],
+  ['KBS World 24', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/kbs_world24/playlist.m3u8', 'https://images.toffeelive.com/images/program/18099/logo/240x240/mobile_logo_684353001673241863.png', 'News'],
+  ['TV5Monde', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/tv5_monde/playlist.m3u8', 'https://images.toffeelive.com/images/program/407/logo/240x240/mobile_logo_448662001655891393.png', 'News'],
+  ['Aljazeera Arabic', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/aljazeera_arabic/playlist.m3u8', 'https://images.toffeelive.com/images/program/658/logo/240x240/mobile_logo_982797001673184503.png', 'News'],
+  ['NHK World-Japan', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/nhk_world/playlist.m3u8', 'https://images.toffeelive.com/images/program/384/logo/240x240/mobile_logo_258111001655891294.png', 'News'],
+  ['France24', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/france24/playlist.m3u8', 'https://images.toffeelive.com/images/program/1768/logo/240x240/mobile_logo_079930001673184899.png', 'News'],
+  ['RT', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/rt/playlist.m3u8', 'https://images.toffeelive.com/images/program/416/logo/240x240/mobile_logo_974196001691566060.png', 'News'],
+  ['TRT World', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/trtworld/playlist.m3u8', 'https://images.toffeelive.com/images/program/131546/logo/240x240/mobile_logo_021540001691566120.png', 'News'],
+  ['ZOOM', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/zoom_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/7838/logo/240x240/mobile_logo_205245001655892068.png', 'Music'],
+  ['B4U Music (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/b4umusic/playlist.m3u8', 'https://images.toffeelive.com/images/program/367/logo/115x115/mobile_logo_886909001563629905.png', 'Music'],
+  ['MTV Beats HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/mtv_beats_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2432/logo/240x240/mobile_logo_564387001655891879.png', 'Music'],
+  ['MTV India', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/mtv/playlist.m3u8', 'https://images.toffeelive.com/images/program/2431/logo/240x240/mobile_logo_398176001655891867.png', 'Music'],
+  ['VH1 HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/vh1_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2433/logo/240x240/mobile_logo_609993001655891894.png', 'Music'],
+  ['NGC VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ngc_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18840/logo/240x240/mobile_logo_024343001683805110.png', 'Entertainment'],
+  ['NGC Wild VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/ngc_wild/playlist.m3u8', 'https://images.toffeelive.com/images/program/18837/logo/240x240/mobile_logo_951347001683805257.png', 'Entertainment'],
+  ['Fox Life VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/fox_life/playlist.m3u8', 'https://images.toffeelive.com/images/program/18833/logo/240x240/mobile_logo_204706001683804802.png', 'Entertainment'],
+  ['Discovery Asia', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_asia/playlist.m3u8', 'https://images.toffeelive.com/images/program/12083/logo/240x240/mobile_logo_141710001663004743.png', 'Entertainment'],
+  ['Investigation Discovery HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_india_id_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18094/logo/240x240/mobile_logo_154805001673178308.png', 'Entertainment'],
+  ['Investigation Discovery', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/discovery_india_id_sd/playlist.m3u8', 'https://images.toffeelive.com/images/program/18095/logo/240x240/mobile_logo_452964001673178334.png', 'Entertainment'],
+  ['HISTORY TV', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/history_tv/playlist.m3u8', 'https://images.toffeelive.com/images/program/2429/logo/240x240/mobile_logo_009938001674474908.png', 'Entertainment'],
+  ['SONY BBC EARTH HD (alt)', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_bbc_earth_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/670/logo/240x240/mobile_logo_363688001655891620.png', 'Entertainment'],
+  ['SONY BBC EARTH', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/sony_bbc_earth/playlist.m3u8', 'https://images.toffeelive.com/images/program/396/logo/240x240/mobile_logo_708825001655891324.png', 'Entertainment'],
+  ['Tech Storm VIP', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/tech_storm/playlist.m3u8', 'https://images.toffeelive.com/images/program/4786/logo/240x240/mobile_logo_570626001655892054.png', 'Entertainment'],
+  ['Infinity HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/colors_infinity_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2428/logo/240x240/mobile_logo_455256001655891827.png', 'Entertainment'],
+  ['Comedy Central HD', 'https://bldcmprod-cdn.toffeelive.com/cdn/live/comedy_central_hd/playlist.m3u8', 'https://images.toffeelive.com/images/program/2427/logo/240x240/mobile_logo_461931001655891802.png', 'Entertainment'],
+];
+
+const TOFFEE_BD_CHANNELS = TOFFEE_BD_RAW.map(([name, url, logo, category]) => ({
+  name,
+  url,
+  logo,
+  cookie: TOFFEE_COOKIE,
+  group: category,
+  categories: [category, 'Toffee'],
+  // No country tag: these are kept out of the per-country browse list and are
+  // only reachable through the dedicated Toffee menu/category.
+  country: '',
+}));
+
+// Hardcoded seed used only if the live feed below has never been fetched
+// successfully (e.g. first run while offline) — once a fetch succeeds this is
+// no longer used.
+const TOFFEE_FALLBACK_CHANNELS = [
+  ...TOFFEE_FIFA_MATCHES,
+  ...TOFFEE_BD_CHANNELS.map((c) => ({ ...c, cookie: TOFFEE_COOKIE })),
+];
+
+// Live, auto-updated Toffee playlist (community-maintained — refreshes its
+// stream URLs/cookies as Toffee rotates them). Pulled at startup and on a
+// timer so channels keep working without needing an app update.
+const TOFFEE_DATA_URL =
+  'https://raw.githubusercontent.com/sm-monirulislam/Toffee-Auto-Update-Playlist/main/toffee_data.json';
+const TOFFEE_CACHE_KEY = 'livetv-toffee-cache-v1';
+const TOFFEE_REFRESH_MS = 30 * 60 * 1000; // re-check for rotated URLs every 30 min
+
+const TOFFEE_CATEGORY_MAP = {
+  'Sports Channels': 'Sports',
+  Sports: 'Sports',
+  LIVE: 'Entertainment',
+  'News Channel': 'News',
+  'Bangladeshi News': 'News',
+  'International News': 'News',
+  'বাংলাদেশী চ্যানেল': 'Entertainment',
+  'Bangladeshi Entertainment': 'Entertainment',
+  'Indian Entertainment': 'Entertainment',
+  'English Entertainment': 'Entertainment',
+  'Entertainment Channels': 'Entertainment',
+  'Popular TV Channels': 'Entertainment',
+  Infotainment: 'Entertainment',
+  Islamic: 'Entertainment',
+  Kids: 'Kids',
+  Music: 'Music',
+  'Bangla Movies': 'Movies',
+  'Indian Movies': 'Movies',
+  'English Movies': 'Movies',
+  'Movie Channels': 'Movies',
+};
+
+function mapToffeeCategory(categoryName) {
+  return TOFFEE_CATEGORY_MAP[categoryName] || 'Entertainment';
+}
+
+// Live match streams (e.g. "BRA VS JAP") get filed under Fifa like the rest
+// of the World Cup coverage; everything else keeps its own genre, plus a
+// shared "Toffee" tag so the Toffee menu/category pulls in all of them. No
+// country tag — Toffee channels are only reachable via that menu, not mixed
+// into the per-country browse list.
+function transformToffeeApiChannel(item) {
+  if (!item || !item.link || !item.name) return null;
+  const isMatch = /\bvs\b/i.test(item.name);
+  const category = isMatch ? 'Fifa' : mapToffeeCategory(item.category_name);
+  return {
+    name: item.name,
+    url: item.link,
+    logo: item.logo || '',
+    cookie: (item.headers && item.headers.cookie) || '',
+    group: category,
+    categories: [category, 'Toffee'],
+    country: '',
+  };
+}
+
+let dynamicToffeeChannels = [];
+
+function readToffeeCache() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TOFFEE_CACHE_KEY));
+    if (!parsed || !Array.isArray(parsed.channels)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeToffeeCache(channels) {
+  try {
+    localStorage.setItem(TOFFEE_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), channels }));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+async function loadToffeeChannels() {
+  const cached = readToffeeCache();
+  if (cached) {
+    dynamicToffeeChannels = cached.channels;
+    rebuildAllChannels();
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${TOFFEE_DATA_URL}?_=${Date.now()}`, { signal: controller.signal, cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const items = Array.isArray(data.response) ? data.response : [];
+    const fresh = dedupe(items.map(transformToffeeApiChannel).filter(Boolean));
+    if (!fresh.length) throw new Error('Empty Toffee feed');
+
+    // Tell the user when Toffee rotated a stream's link/cookie since the last
+    // fetch, rather than just silently swapping it in.
+    const prevByName = new Map((cached?.channels || []).map((c) => [c.name, c.url]));
+    let changedCount = 0;
+    for (const c of fresh) {
+      const prevUrl = prevByName.get(c.name);
+      if (prevUrl && prevUrl !== c.url) changedCount++;
+    }
+
+    dynamicToffeeChannels = fresh;
+    writeToffeeCache(fresh);
+    rebuildAllChannels();
+    renderTrendingCategories();
+    if (browseView.style.display !== 'none') {
+      renderCategories();
+      renderChannelGrid();
+    }
+
+    if (cached && changedCount > 0) {
+      const prevStatus = statusPill.textContent;
+      setStatus(`Toffee updated: ${changedCount} channel link${changedCount === 1 ? '' : 's'} refreshed`);
+      setTimeout(() => setStatus(prevStatus), 6000);
+    }
+  } catch (err) {
+    console.warn('Failed to load Toffee channels:', err.message);
+    if (!dynamicToffeeChannels.length) {
+      dynamicToffeeChannels = TOFFEE_FALLBACK_CHANNELS;
+      rebuildAllChannels();
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Backend CORS/mixed-content proxy (see server/). Falls back to it
 // automatically when a stream fails to load directly.
 const PROXY_BASE = import.meta.env.VITE_PROXY_BASE || 'http://localhost:8787';
 
+// Some sources (e.g. Toffee) gate streams behind a signed cookie. When the
+// channel currently playing carries one and matches the url being proxied,
+// thread it through so the backend can forward it upstream.
+function channelCookieFor(url) {
+  return currentChannel && currentChannel.url === url && currentChannel.cookie ? currentChannel.cookie : '';
+}
+
 function proxiedManifestUrl(url) {
-  return `${PROXY_BASE}/proxy/m3u8?url=${encodeURIComponent(url)}`;
+  const cookie = channelCookieFor(url);
+  return `${PROXY_BASE}/proxy/m3u8?url=${encodeURIComponent(url)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`;
 }
 
 function proxiedSegmentUrl(url) {
-  return `${PROXY_BASE}/proxy/segment?url=${encodeURIComponent(url)}`;
+  const cookie = channelCookieFor(url);
+  return `${PROXY_BASE}/proxy/segment?url=${encodeURIComponent(url)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`;
 }
 
 const CACHE_KEY = 'livetv-channel-cache-v2';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 25000; // the iptv-org playlist is ~2.7MB; a slow CDN moment needs headroom
 const PAGE_SIZE = 150;
+// Live HLS segments arrive at roughly the rate they're consumed, so "extra"
+// buffer only accumulates at however much download speed exceeds 1x — asking
+// for too many seconds here just means every channel eats the full timeout
+// before ever starting. 3s is enough to absorb the first-segment jitter that
+// causes early stuttering without reintroducing a multi-second startup delay.
+const PRELOAD_BUFFER_SECONDS = 3;
+const PRELOAD_MAX_WAIT_MS = 3000; // ...and never make the viewer wait longer than this for it
+const LIVE_BEHIND_THRESHOLD_S = 8; // show "behind live" once this far from the live edge
 const RECENTS_KEY = 'livetv-recent-channels';
 const RECENTS_MAX = 10;
 const VOLUME_KEY = 'livetv-volume-pref';
@@ -98,6 +456,7 @@ app.innerHTML = `
       <button class="menu-item" data-view="browse">Live TV</button>
       <button class="menu-item" data-view="fifa-tv">🏆 FIFA 2026</button>
       <button class="menu-item" data-view="fifa">⚽ Schedule</button>
+      <button class="menu-item" data-view="toffee">📺 Toffee</button>
     </nav>
     <button id="add-channel-btn" class="add-channel-btn" title="Add your own channel">＋ Add</button>
     <div class="country-select-wrap">
@@ -146,6 +505,12 @@ app.innerHTML = `
         <h3 class="section-title">⚽ FIFA World Cup — Results &amp; Schedule</h3>
         <div class="fifa-tabs" id="fifa-tabs"></div>
         <div id="fifa-schedule" class="fifa-schedule"></div>
+      </div>
+
+      <div class="home-section" id="toffee-section">
+        <h3 class="section-title">📺 Toffee Live TV</h3>
+        <p class="home-sub">Bangladeshi channels, Sony/Zee networks &amp; FIFA matches from Toffee.</p>
+        <button id="toffee-open-btn" class="hero-cta">Browse Toffee Channels</button>
       </div>
 
       <div class="home-section" id="trending-cat-section" style="display:none">
@@ -214,8 +579,9 @@ app.innerHTML = `
             <button id="next-channel-btn" class="ctrl-btn" title="Next channel (N)">⏭</button>
             <button id="mute-btn" class="ctrl-btn" title="Mute/Unmute (M)">🔊</button>
             <input id="volume" class="volume-slider" type="range" min="0" max="1" step="0.05" value="1" />
-            <span id="live-badge" class="live-badge">● LIVE</span>
+            <button id="live-badge" class="live-badge" title="Jump to live">● LIVE</button>
             <div class="spacer"></div>
+            <span id="buffer-badge" class="net-quality-badge" style="display:none">Buffering…</span>
             <button id="shortcuts-btn" class="ctrl-btn" title="Keyboard shortcuts">⌨</button>
             <select id="quality-select" class="quality-select" title="Quality"></select>
             <button id="pip-btn" class="ctrl-btn" title="Picture-in-Picture (P)">⧉</button>
@@ -356,6 +722,7 @@ const nextChannelBtn = document.querySelector('#next-channel-btn');
 const shortcutsBtn = document.querySelector('#shortcuts-btn');
 const shortcutsPanel = document.querySelector('#shortcuts-panel');
 const netQualityBadge = document.querySelector('#net-quality-badge');
+const bufferBadge = document.querySelector('#buffer-badge');
 
 // ---------- State ----------
 
@@ -394,6 +761,7 @@ function showView(name) {
   menuItems.forEach((el) => el.classList.toggle('active', el.dataset.view === name));
   hideSearchResults();
   shortcutsPanel.style.display = 'none';
+  trackPageView(`/${name}`, `LiveTV — ${name}`);
 
   if (name !== 'player') {
     stopStream();
@@ -405,6 +773,10 @@ menuItems.forEach((el) => {
   el.addEventListener('click', () => {
     if (el.dataset.view === 'fifa-tv') {
       enterCategoryFromHome('Fifa');
+      return;
+    }
+    if (el.dataset.view === 'toffee') {
+      enterCategoryFromHome('Toffee');
       return;
     }
     if (el.dataset.view === 'browse') enterBrowse();
@@ -430,6 +802,8 @@ backBtn.addEventListener('click', () => {
 
 setActiveCountry('BD');
 initPlaylists();
+loadToffeeChannels();
+setInterval(loadToffeeChannels, TOFFEE_REFRESH_MS);
 loadLiveEvents();
 loadFifaSchedule();
 renderRecents();
@@ -484,7 +858,7 @@ async function initPlaylists() {
 // their category) + the playlist-loaded ones. Custom channels survive the
 // periodic playlist refresh because they're re-merged here every time.
 function rebuildAllChannels() {
-  allChannels = dedupe([...readCustomChannels(), ...BUILTIN_FIFA_CHANNELS, ...baseChannels]);
+  allChannels = dedupe([...readCustomChannels(), ...BUILTIN_FIFA_CHANNELS, ...dynamicToffeeChannels, ...baseChannels]);
 }
 
 function readCustomChannels() {
@@ -785,6 +1159,9 @@ function renderHero() {
   heroDotsEl.querySelectorAll('.hero-dot').forEach((el) => {
     el.addEventListener('click', () => goToHeroSlide(parseInt(el.dataset.idx, 10)));
   });
+
+  const toffeeOpenBtn = document.querySelector('#toffee-open-btn');
+  if (toffeeOpenBtn) toffeeOpenBtn.addEventListener('click', () => enterCategoryFromHome('Toffee'));
 
   heroSlidesEl.querySelectorAll('.hero-cta').forEach((btn, i) => {
     btn.addEventListener('click', (e) => {
@@ -1783,6 +2160,7 @@ function playChannel(channel, isAuto = false) {
   setNetStatus('');
   showView('player');
   addRecent(channel);
+  trackEvent('select_content', { content_type: 'channel', item_id: channel.name, group: channel.group });
 
   startViewerWatch(channel.url);
   startStream(channel.url);
@@ -1920,9 +2298,9 @@ function startStream(url, { viaProxy = false } = {}) {
       backBufferLength: 30,
       liveSyncDurationCount: 3,
       liveDurationInfinity: true,
-      // Don't waste bandwidth/CPU decoding a higher resolution than the
-      // player is actually displayed at.
-      capLevelToPlayerSize: true,
+      // Off: the resolution dropdown is meant to give a real manual choice —
+      // auto-capping to the player's on-screen size fought with that.
+      capLevelToPlayerSize: false,
       // Fail fast: a dead/unreachable stream should surface clearly within a
       // few seconds rather than hls.js silently retrying for 30-60s+ before
       // we even get a fatal error to react to.
@@ -1940,10 +2318,9 @@ function startStream(url, { viaProxy = false } = {}) {
 
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       populateQualityLevels(hls.levels);
-      showSpinner(false);
       disarmWatchdog();
       restoreVolumePref();
-      video.play().catch(() => {});
+      preloadThenPlay();
     });
 
     hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
@@ -1993,6 +2370,8 @@ function stopStream() {
   clearTimeout(failoverTimer);
   disarmWatchdog();
   stopNetQualityMonitor();
+  stopPreload();
+  stopLiveSyncMonitor();
   destroyPlayers();
   video.removeAttribute('src');
   video.load();
@@ -2031,7 +2410,8 @@ async function startMpegtsStream(url, viaProxy = false) {
     });
     tsPlayer.load();
     startNetQualityMonitor();
-    video.play().catch(() => {});
+    disarmWatchdog();
+    preloadThenPlay();
   } catch (err) {
     failChannel('Could not start this stream');
   }
@@ -2050,6 +2430,106 @@ function scheduleRetry(url, viaProxy = false) {
 function showSpinner(show) {
   spinner.style.display = show ? 'block' : 'none';
 }
+
+// ---------- Buffer-ahead preload: wait for a healthy cushion before hitting play ----------
+
+let preloadTimer = null;
+
+function bufferedAheadSeconds() {
+  if (!video.buffered.length) return 0;
+  try {
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (video.buffered.start(i) <= video.currentTime && video.currentTime <= video.buffered.end(i)) {
+        return video.buffered.end(i) - video.currentTime;
+      }
+    }
+    const last = video.buffered.length - 1;
+    return video.buffered.end(last) - video.buffered.start(last);
+  } catch {
+    return 0;
+  }
+}
+
+// Holds off calling play() until ~PRELOAD_BUFFER_SECONDS is actually buffered
+// (capped at PRELOAD_MAX_WAIT_MS so a slow stream doesn't make you wait
+// forever) — trades a couple of seconds of upfront wait for far fewer
+// mid-stream stalls.
+function preloadThenPlay() {
+  clearInterval(preloadTimer);
+  showSpinner(false);
+  bufferBadge.style.display = 'inline-flex';
+  const start = Date.now();
+  preloadTimer = setInterval(() => {
+    const ahead = bufferedAheadSeconds();
+    bufferBadge.textContent = `Buffering… ${Math.min(ahead, PRELOAD_BUFFER_SECONDS).toFixed(0)}/${PRELOAD_BUFFER_SECONDS}s`;
+    if (ahead >= PRELOAD_BUFFER_SECONDS || Date.now() - start > PRELOAD_MAX_WAIT_MS) {
+      clearInterval(preloadTimer);
+      preloadTimer = null;
+      bufferBadge.style.display = 'none';
+      video.play().catch(() => {});
+      startLiveSyncMonitor();
+    }
+  }, 250);
+}
+
+function stopPreload() {
+  clearInterval(preloadTimer);
+  preloadTimer = null;
+  bufferBadge.style.display = 'none';
+}
+
+// ---------- Live edge: clickable LIVE badge, "behind live" indicator ----------
+
+let liveSyncTimer = null;
+
+function liveEdgeTime() {
+  if (hls && hls.liveSyncPosition != null) return hls.liveSyncPosition;
+  if (video.seekable && video.seekable.length) {
+    try {
+      return video.seekable.end(video.seekable.length - 1);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function updateLiveStatus() {
+  const edge = liveEdgeTime();
+  if (edge == null) return;
+  const delay = edge - video.currentTime;
+  if (delay > LIVE_BEHIND_THRESHOLD_S) {
+    liveBadge.classList.add('behind');
+    liveBadge.textContent = `⚠ ${Math.round(delay)}s behind — GO LIVE`;
+  } else {
+    liveBadge.classList.remove('behind');
+    liveBadge.textContent = '● LIVE';
+  }
+}
+
+function startLiveSyncMonitor() {
+  clearInterval(liveSyncTimer);
+  liveSyncTimer = setInterval(updateLiveStatus, 2000);
+  updateLiveStatus();
+}
+
+function stopLiveSyncMonitor() {
+  clearInterval(liveSyncTimer);
+  liveSyncTimer = null;
+  liveBadge.classList.remove('behind');
+  liveBadge.textContent = '● LIVE';
+}
+
+function goLive() {
+  const edge = liveEdgeTime();
+  if (edge != null) {
+    video.currentTime = Math.max(0, edge - 0.5);
+  }
+  video.play().catch(() => {});
+  updateLiveStatus();
+}
+
+liveBadge.addEventListener('click', goLive);
 
 // Some streams don't report a usable height (audio-only renditions, or
 // servers that omit RESOLUTION in the manifest) — fall back to bitrate or a
@@ -2098,11 +2578,10 @@ video.addEventListener('playing', () => {
 video.addEventListener('loadedmetadata', () => {
   // Metadata available = the stream works (even if autoplay is paused).
   // Finalize load (native-HLS/Safari has no MANIFEST_PARSED) and end failover.
-  showSpinner(false);
   disarmWatchdog();
   autoFailoverAttempts = 0;
   restoreVolumePref();
-  video.play().catch(() => {});
+  preloadThenPlay();
 });
 
 muteBtn.addEventListener('click', () => toggleMute());
@@ -2155,18 +2634,115 @@ pipBtn.addEventListener('click', async () => {
   }
 });
 
+// Cross-browser fullscreen: Safari (desktop+iOS) still needs the
+// webkit-prefixed API, and a few older/embedded browsers need the others.
+function fsElement() {
+  return (
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement ||
+    null
+  );
+}
+
+function requestFs(el) {
+  const fn = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+  if (!fn) return Promise.reject(new Error('Fullscreen API not available'));
+  return fn.call(el) || Promise.resolve();
+}
+
+function exitFs() {
+  const fn =
+    document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+  if (!fn) return Promise.reject(new Error('Fullscreen API not available'));
+  return fn.call(document) || Promise.resolve();
+}
+
+// Some browsers throw requestFullscreen/exitFullscreen SYNCHRONOUSLY (not as a
+// rejected promise) under certain conditions — a bare .catch() doesn't catch
+// that, so the whole handler would die silently with zero feedback, looking
+// exactly like "the button does nothing". Wrapped in try/catch so every
+// failure path is guaranteed to surface a message instead of going silent.
+function isMobileViewport() {
+  return window.matchMedia('(max-width: 820px)').matches || /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+}
+
+async function tryLockLandscape() {
+  if (!isMobileViewport()) return;
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      await screen.orientation.lock('landscape');
+    }
+  } catch {
+    // Not supported (iOS Safari has no orientation.lock at all) or not
+    // permitted outside fullscreen on this browser — best-effort only.
+  }
+}
+
+function tryUnlockOrientation() {
+  try {
+    if (screen.orientation && screen.orientation.unlock) {
+      screen.orientation.unlock();
+    }
+  } catch {
+    // ignore
+  }
+}
+
 fullscreenBtn.addEventListener('click', () => {
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    playerWrap.requestFullscreen().catch(() => {});
+  try {
+    if (fsElement()) {
+      Promise.resolve(exitFs()).catch((err) => console.warn('exitFullscreen failed:', err));
+      return;
+    }
+    // iOS Safari only supports native fullscreen on the <video> element itself.
+    if (video.webkitEnterFullscreen && !document.fullscreenEnabled) {
+      video.webkitEnterFullscreen();
+      return;
+    }
+    Promise.resolve(requestFs(playerWrap)).catch((err) => {
+      console.warn('requestFullscreen rejected:', err);
+      setNetStatus("Fullscreen isn't available here (blocked by the page/embed)", true);
+    });
+  } catch (err) {
+    console.warn('Fullscreen threw synchronously:', err);
+    setNetStatus("Fullscreen isn't available here (blocked by the page/embed)", true);
   }
 });
+
+['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'].forEach((evt) => {
+  document.addEventListener(evt, () => {
+    const active = Boolean(fsElement());
+    fullscreenBtn.textContent = active ? '⤢' : '⛶';
+    if (active) tryLockLandscape();
+    else tryUnlockOrientation();
+  });
+});
+
+// iOS's native <video> fullscreen doesn't fire the standard fullscreenchange
+// events — hook its own begin/end events so the landscape lock still applies.
+video.addEventListener('webkitbeginfullscreen', () => tryLockLandscape());
+video.addEventListener('webkitendfullscreen', () => tryUnlockOrientation());
 
 video.addEventListener('dblclick', () => fullscreenBtn.click());
 
 // Single click toggles play/pause (ignored on the same click that ends a drag/double-click via dblclick's own handling)
 video.addEventListener('click', () => playBtn.click());
+
+// Tap/click-to-reveal controls: relying purely on CSS :hover to make the
+// control bar interactive is unreliable on touch devices (no real hover
+// state, and some browsers need two taps for hover-gated elements). This
+// JS-driven fallback guarantees the controls — including fullscreen — are
+// actually clickable after any tap on the player, auto-hiding after a pause.
+let controlsHideTimer = null;
+function showControlsTemporarily() {
+  controls.classList.add('force-visible');
+  clearTimeout(controlsHideTimer);
+  controlsHideTimer = setTimeout(() => controls.classList.remove('force-visible'), 4000);
+}
+playerWrap.addEventListener('pointerdown', showControlsTemporarily);
+showControlsTemporarily(); // visible immediately when a channel starts
 
 shortcutsBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -2243,19 +2819,6 @@ document.addEventListener('keydown', (e) => {
       volumeSlider.value = String(video.volume);
       saveVolumePref();
       break;
-  }
-});
-
-// ---------- Pause playback when the tab is hidden (saves bandwidth/CPU) ----------
-
-let wasPlayingBeforeHidden = false;
-document.addEventListener('visibilitychange', () => {
-  if (playerView.style.display === 'none') return;
-  if (document.hidden) {
-    wasPlayingBeforeHidden = !video.paused;
-    video.pause();
-  } else if (wasPlayingBeforeHidden) {
-    video.play().catch(() => {});
   }
 });
 

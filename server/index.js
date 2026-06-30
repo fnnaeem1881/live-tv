@@ -73,14 +73,18 @@ function fetchUpstream(target, extraHeaders = {}) {
   });
 }
 
-function proxiedUrl(kind, absoluteUrl) {
-  return `/proxy/${kind}?url=${encodeURIComponent(absoluteUrl)}`;
+function proxiedUrl(kind, absoluteUrl, cookie) {
+  let url = `/proxy/${kind}?url=${encodeURIComponent(absoluteUrl)}`;
+  if (cookie) url += `&cookie=${encodeURIComponent(cookie)}`;
+  return url;
 }
 
 // Rewrites every URI line in an HLS manifest (master or media playlist) to
 // route back through this proxy, resolving relative URLs against the
-// manifest's own location first.
-function rewriteManifest(text, baseUrl) {
+// manifest's own location first. The cookie (if the channel needs one, e.g.
+// Toffee's signed Edge-Cache-Cookie) is threaded through to every rewritten
+// URL so sub-playlists and segments stay authenticated too.
+function rewriteManifest(text, baseUrl, cookie) {
   const lines = text.split(/\r?\n/);
   const out = lines.map((line) => {
     const trimmed = line.trim();
@@ -92,7 +96,7 @@ function rewriteManifest(text, baseUrl) {
       if (uriMatch) {
         const abs = new URL(uriMatch[1], baseUrl).toString();
         const kind = abs.includes('.m3u8') ? 'm3u8' : 'segment';
-        return line.replace(uriMatch[1], proxiedUrl(kind, abs));
+        return line.replace(uriMatch[1], proxiedUrl(kind, abs, cookie));
       }
       return line;
     }
@@ -100,7 +104,7 @@ function rewriteManifest(text, baseUrl) {
     // A plain URI line: a variant playlist, a media segment, etc.
     const abs = new URL(trimmed, baseUrl).toString();
     const kind = abs.includes('.m3u8') ? 'm3u8' : 'segment';
-    return proxiedUrl(kind, abs);
+    return proxiedUrl(kind, abs, cookie);
   });
   return out.join('\n');
 }
@@ -130,8 +134,9 @@ const server = http.createServer(async (req, res) => {
       res.end('Invalid or disallowed url');
       return;
     }
+    const cookie = reqUrl.searchParams.get('cookie') || '';
     try {
-      const upstream = await fetchUpstream(target);
+      const upstream = await fetchUpstream(target, cookie ? { Cookie: cookie } : {});
       if (upstream.statusCode >= 400) {
         sendCors(res);
         res.writeHead(upstream.statusCode);
@@ -141,7 +146,7 @@ const server = http.createServer(async (req, res) => {
       const chunks = [];
       for await (const chunk of upstream) chunks.push(chunk);
       const text = Buffer.concat(chunks).toString('utf-8');
-      const rewritten = rewriteManifest(text, target.toString());
+      const rewritten = rewriteManifest(text, target.toString(), cookie);
 
       sendCors(res);
       res.writeHead(200, {
@@ -168,6 +173,8 @@ const server = http.createServer(async (req, res) => {
     try {
       const extraHeaders = {};
       if (req.headers.range) extraHeaders.Range = req.headers.range;
+      const cookie = reqUrl.searchParams.get('cookie');
+      if (cookie) extraHeaders.Cookie = cookie;
       const upstream = await fetchUpstream(target, extraHeaders);
 
       sendCors(res);
