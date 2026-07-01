@@ -197,6 +197,8 @@ const server = http.createServer(async (req, res) => {
   res.end('Not found');
 });
 
-server.listen(PORT, () => {
-  console.log(`LiveTV stream proxy listening on http://localhost:${PORT}`);
+const HOST = '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
+  console.log(`LiveTV stream proxy listening on http://${HOST}:${PORT}`);
 });

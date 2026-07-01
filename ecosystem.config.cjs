@@ -21,6 +21,7 @@ module.exports = {
       watch: false,
       env: {
         PORT: 8787,
+        HOST: '0.0.0.0',
       },
     },
   ],

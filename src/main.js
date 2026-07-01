@@ -19,11 +19,6 @@ const DEFAULT_PLAYLISTS = [
 // category (deduped by URL). Dead ones are skipped by the player's auto-failover.
 const FIFA_LOGO = 'https://assets.football-logos.cc/logos/tournaments/1500x1500/fifa-world-cup-2026--white.10e0b37b.png';
 const BUILTIN_FIFA_CHANNELS = [
-  { name: 'FOX (USA)', url: 'https://cdn011.viaplus.site/fox-usa.m3u8' },
-  { name: 'Telemundo (USA)', url: 'https://cdn011.viaplus.site/telemundo-usa.m3u8' },
-  { name: 'TSN 1 (Canada)', url: 'https://cdn011.viaplus.site/tsn1-ca.m3u8' },
-  { name: 'FOX 4K (USA)', url: 'https://cdn011.viaplus.site/fox4k-usa.m3u8' },
-  { name: 'Fussball TV 1 UHD (Germany)', url: 'https://cdn011.viaplus.site/fussballtv1uhd-de.m3u8' },
   // Toffee's CDN sends no Access-Control-Allow-Origin, so a browser can't load
   // it directly — startStream() auto-retries through our proxy on failure.
   { name: 'Toffee FIFA HD (BD)', url: 'https://prod-cdn01-live.toffeelive.com/live/FIFA-2026-3/0/master_1750.m3u8?hdntl=Expires=1782866074~_GO=Generated~URLPrefix=aHR0cHM6Ly9wcm9kLWNkbjAxLWxpdmUudG9mZmVlbGl2ZS5jb20~Signature=AeQsclCGelVte2IiOGcwsJnkVmlh9kIGZARR9-eMUV_OPS2_vvtjSSYwO-FbiiXEh7epqBKkckq6D9zMuD4nm4j2BHQL' },
@@ -47,7 +42,6 @@ const BUILTIN_FIFA_CHANNELS = [
   { name: 'Win Sports HD', url: 'https://1nyaler.streamhostingcdn.top/stream/32/index.m3u8' },
   { name: 'CAZE TV', url: 'https://dfr80qz435crc.cloudfront.net/MNOP/Amagi/Caze/Caze_TV_BR/Caze_TV.m3u8' },
   { name: 'CAZE TV Server 2', url: 'https://dfr80qz435crc.cloudfront.net/MNOP/Amagi/Caze/Caze_TV_BR/1080p-vtt/index.m3u8' },
-  { name: 'CazéTV (Alt)', url: 'https://cdn011.viaplus.site/fox-usa.m3u8' },
   { name: 'TAPMAD', url: 'https://serieAleague.akamaized.net/hls/live/2107107/PSLE_tapmad2026-Backup/master.m3u8' },
   { name: 'ARABIC LIVE', url: 'https://live-aburayhan1111.telewebion.ir/ek/sport1/live/720p/index.m3u8' },
   { name: 'ARABIC LIVE HD', url: 'https://43cup.s3.us-east-2.amazonaws.com/max4/master.m3u8' },
@@ -57,7 +51,6 @@ const BUILTIN_FIFA_CHANNELS = [
   { name: 'IRIB 4K', url: 'https://ncdn.telewebion.ir/faratar/live/playlist.m3u8' },
   { name: 'Unite 8 Sports', url: 'http://212.102.34.8:9080/AndFlixHD/video.m3u8' },
   { name: '1 Toffee', url: 'https://prod-cdn01-live.toffeelive.com/live/FIFA-2026/sst/0/master_1500.m3u8?hdntl=Expires=1782924250~_GO=Generated~URLPrefix=aHR0cHM6Ly9wcm9kLWNkbjAxLWxpdmUudG9mZmVlbGl2ZS5jb20~Signature=AeQsclBqwZp0SAOB2OCxO_9fL9UrwMyo2g2XlvPGKtvjq6depqLoVLcp8PhNHVNqab5XP4nAno7LKWhZQMMRwu8XXzQO' },
-  { name: '2 Toffee', url: 'https://cdn011.viaplus.site/fox-usa.m3u8' },
   { name: '3 Toffee', url: 'https://sm-monirul.top/tof/live/ecuvscur/index.m3u8?nocache=1782332098061' },
   { name: 'Discovery', url: 'https://mflixott.com/tv/toffee-by-maruf/live.php?id=UxwQw614OTg00S84mm&e=.m3u8' },
   { name: 'GO 3', url: 'http://ytoxw6un.ottclub.xyz/iptv/KCUHA6DGYYVA8ZZFUPQV3KZH/6408/index.m3u8' },
